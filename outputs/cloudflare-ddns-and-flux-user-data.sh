@@ -31,7 +31,8 @@ CONNECT_TIMEOUT=3
 MAX_TIME=10
 FLUX_INSTALL_MAX_TIME=600
 LOG_FILE="/var/log/cloudflare-ddns.log"
-DRY_RUN=false                # true: query only; never create/update a DNS record or install Flux
+SYSCTL_FILE="/etc/sysctl.d/99-ec2-bbr-tuning.conf"
+DRY_RUN=false                # true: never change sysctl/DNS or install Flux
 
 if [[ "${DDNS_UNIT_TEST_MODE:-false}" != "true" ]]; then
     mkdir -p "$(dirname "$LOG_FILE")"
@@ -212,6 +213,88 @@ cf_api() {
     return 1
 }
 
+apply_tcp_tuning() {
+    local available_cc interface attempt
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "Dry run: TCP/BBR tuning skipped."
+        return 0
+    fi
+
+    require_command sysctl
+    require_command ip
+    require_command tc
+
+    # These modules may already be built into the Ubuntu/Debian kernel.
+    if command -v modprobe >/dev/null 2>&1; then
+        modprobe tcp_bbr 2>/dev/null || true
+        modprobe sch_fq 2>/dev/null || true
+    fi
+
+    if ! available_cc="$(sysctl -n net.ipv4.tcp_available_congestion_control)"; then
+        die "Unable to read the available TCP congestion-control algorithms."
+    fi
+    if ! grep -qw bbr <<< "$available_cc"; then
+        die "The running kernel does not provide BBR; refusing to apply incomplete TCP tuning."
+    fi
+
+    cat > "$SYSCTL_FILE" <<'EOF'
+# Managed by cloudflare-ddns-and-flux-user-data.sh
+# AWS EC2 TCP tuning: BBR + FQ
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# Per-socket buffer ceilings: 16 MiB
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 131072 16777216
+net.ipv4.tcp_wmem = 4096 16384 16777216
+net.ipv4.tcp_moderate_rcvbuf = 1
+
+# Path and connection behaviour
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+
+# Connection and packet queues
+net.core.somaxconn = 16384
+net.ipv4.tcp_max_syn_backlog = 8192
+net.core.netdev_max_backlog = 8192
+EOF
+
+    if ! sysctl --load="$SYSCTL_FILE"; then
+        die "Failed to load TCP tuning from $SYSCTL_FILE."
+    fi
+
+    [[ "$(sysctl -n net.ipv4.tcp_congestion_control)" == "bbr" ]] ||
+        die "BBR was not enabled after loading sysctl settings."
+    [[ "$(sysctl -n net.core.default_qdisc)" == "fq" ]] ||
+        die "FQ was not set as the default queue discipline."
+
+    # net.core.default_qdisc affects future interfaces. Apply FQ immediately to
+    # the already-created EC2 primary interface as well.
+    interface=""
+    for ((attempt = 1; attempt <= RETRY_COUNT; attempt++)); do
+        interface="$(ip -o route show default 2>/dev/null | awk 'NR==1 {print $5}')"
+        if [[ -n "$interface" ]]; then
+            break
+        fi
+        if (( attempt < RETRY_COUNT )); then
+            sleep "$RETRY_INTERVAL"
+        fi
+    done
+    [[ -n "$interface" ]] || die "Could not determine the default EC2 network interface."
+
+    if ! tc qdisc replace dev "$interface" root fq; then
+        die "Could not apply the FQ queue discipline to interface $interface."
+    fi
+    if ! tc qdisc show dev "$interface" | grep -q '^qdisc fq '; then
+        die "FQ is not active on interface $interface after applying TCP tuning."
+    fi
+
+    log "TCP tuning applied: BBR + FQ on ${interface}; settings persist in ${SYSCTL_FILE}."
+}
+
 install_flux_panel() {
     local installer_file attempt
 
@@ -280,6 +363,8 @@ main() {
         die "DNS_TTL must be a supported positive DNS-only TTL, such as 300."
     [[ "$DRY_RUN" == "true" || "$DRY_RUN" == "false" ]] ||
         die "DRY_RUN must be either true or false."
+
+    apply_tcp_tuning
 
     if ! dns_name="$(python3 -c 'import sys; print(sys.argv[1].rstrip(".").encode("idna").decode("ascii").lower())' "$DOMAIN")"; then
         die "DOMAIN is invalid: $DOMAIN"

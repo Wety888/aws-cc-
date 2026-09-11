@@ -8,6 +8,12 @@ exact A record configured as `DOMAIN`. It uses a Cloudflare API Token, forces
 `proxied=false`, retries temporary network failures, and can optionally run the
 Flux installer after DDNS completes.
 
+Before DDNS, it also applies persistent TCP tuning: BBR congestion control, FQ
+queue discipline, 16 MiB receive/send buffer ceilings, TCP buffer autotuning,
+MTU probing, TCP Fast Open, disabled slow start after idle, and the requested
+connection/backlog limits. The settings are saved in
+`/etc/sysctl.d/99-ec2-bbr-tuning.conf`.
+
 ## Security
 
 This repository intentionally contains **no credentials**. Keep all of these
