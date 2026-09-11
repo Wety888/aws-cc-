@@ -11,15 +11,15 @@ set -euo pipefail
 ###############################################################################
 # Required configuration -- replace every placeholder before deployment.
 ###############################################################################
-CF_API_TOKEN="REPLACE_WITH_A_NEW_CLOUDFLARE_API_TOKEN"
-CF_ZONE_ID="REPLACE_WITH_YOUR_32_CHARACTER_CLOUDFLARE_ZONE_ID"
-DOMAIN="2024.luneza.cc"
+CF_API_TOKEN="${CF_API_TOKEN:-REPLACE_WITH_A_NEW_CLOUDFLARE_API_TOKEN}"
+CF_ZONE_ID="${CF_ZONE_ID:-REPLACE_WITH_YOUR_32_CHARACTER_CLOUDFLARE_ZONE_ID}"
+DOMAIN="${DOMAIN:-2024.luneza.cc}"
 
 # Flux Panel installation. Keep this disabled only if DDNS is all you need.
-FLUX_INSTALL_ENABLED=true
-FLUX_INSTALL_URL="https://github.com/bqlpfy/flux-panel/releases/download/1.4.3/install.sh"
-FLUX_ADDRESS="REPLACE_WITH_HOST_OR_IP_AND_PORT" # Example: 203.0.113.10:6365
-FLUX_SECRET="REPLACE_WITH_A_NEW_FLUX_SECRET"
+FLUX_INSTALL_ENABLED="${FLUX_INSTALL_ENABLED:-true}"
+FLUX_INSTALL_URL="${FLUX_INSTALL_URL:-https://github.com/bqlpfy/flux-panel/releases/download/1.4.3/install.sh}"
+FLUX_ADDRESS="${FLUX_ADDRESS:-REPLACE_WITH_HOST_OR_IP_AND_PORT}" # Example: 203.0.113.10:6365
+FLUX_SECRET="${FLUX_SECRET:-REPLACE_WITH_A_NEW_FLUX_SECRET}"
 
 ###############################################################################
 # Optional configuration

@@ -33,6 +33,10 @@ Either paste the complete script directly into EC2 User Data after configuring
 it, or download the public template and inject configuration through a private
 deployment process. For a safe read-only validation first, set `DRY_RUN=true`.
 
+For the latter method, use `outputs/ec2-one-click-bootstrap.sh`: configure its
+private values locally, then paste the entire file into EC2 User Data. It
+downloads the public template and passes those values only to the local process.
+
 Logs are written to `/var/log/cloudflare-ddns.log` and also appear in cloud-init
 output.
 
