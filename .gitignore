@@ -1,0 +1,9 @@
+# Local test artifacts and possible secret-bearing local overrides
+work/
+*.log
+*.local
+.env
+.env.*
+
+# Never commit populated deployment copies
+cloudflare-ddns-and-flux-user-data.private.sh

@@ -1,0 +1,35 @@
+# AWS EC2 Cloudflare DDNS + Flux bootstrap
+
+This repository contains a non-interactive EC2 User Data Bash script for Ubuntu
+22.04/24.04 and Debian 12.
+
+It reads the EC2 public IPv4 (IMDSv2 first), then creates or updates only the
+exact A record configured as `DOMAIN`. It uses a Cloudflare API Token, forces
+`proxied=false`, retries temporary network failures, and can optionally run the
+Flux installer after DDNS completes.
+
+## Security
+
+This repository intentionally contains **no credentials**. Keep all of these
+values private:
+
+- `CF_API_TOKEN`
+- `CF_ZONE_ID`
+- `FLUX_ADDRESS`
+- `FLUX_SECRET`
+
+Before using the script, edit the configuration block at its top. Do not commit
+the populated version back to this repository.
+
+## Use as EC2 User Data
+
+Either paste the complete script directly into EC2 User Data after configuring
+it, or download the public template and inject configuration through a private
+deployment process. For a safe read-only validation first, set `DRY_RUN=true`.
+
+Logs are written to `/var/log/cloudflare-ddns.log` and also appear in cloud-init
+output.
+
+## Script
+
+[`outputs/cloudflare-ddns-and-flux-user-data.sh`](outputs/cloudflare-ddns-and-flux-user-data.sh)
