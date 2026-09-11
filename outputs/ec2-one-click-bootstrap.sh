@@ -15,6 +15,13 @@ DOMAIN="${DOMAIN:-2024.luneza.cc}"
 DRY_RUN="${DRY_RUN:-false}"
 
 SCRIPT_URL="https://raw.githubusercontent.com/Wety888/aws-cc-/main/outputs/cloudflare-ddns-and-flux-user-data.sh"
+SCRIPT_FILE=""
+
+cleanup() {
+    [[ -n "$SCRIPT_FILE" ]] && rm -f "$SCRIPT_FILE"
+}
+
+trap cleanup EXIT
 
 usage() {
     cat <<'EOF'
@@ -104,8 +111,6 @@ print(records[0]["id"])
 }
 
 main() {
-    local script_file
-
     parse_arguments "$@"
     [[ -n "$CF_API_TOKEN" ]] || { printf 'Missing --cf-api-token\n' >&2; exit 2; }
     resolve_zone_id
@@ -113,14 +118,13 @@ main() {
     [[ -n "$FLUX_ADDRESS" ]] || { printf 'Missing --flux-address\n' >&2; exit 2; }
     [[ -n "$FLUX_SECRET" ]] || { printf 'Missing --flux-secret\n' >&2; exit 2; }
 
-    script_file="$(mktemp /tmp/ec2-ddns-bootstrap.XXXXXX)"
-    trap 'rm -f "$script_file"' EXIT
+    SCRIPT_FILE="$(mktemp /tmp/ec2-ddns-bootstrap.XXXXXX)"
 
     curl --fail --location --silent --show-error \
         --retry 10 --retry-delay 5 --retry-connrefused \
         --connect-timeout 10 --max-time 120 \
-        "$SCRIPT_URL" --output "$script_file"
-    chmod 700 "$script_file"
+        "$SCRIPT_URL" --output "$SCRIPT_FILE"
+    chmod 700 "$SCRIPT_FILE"
 
     CF_API_TOKEN="$CF_API_TOKEN" \
     CF_ZONE_ID="$CF_ZONE_ID" \
@@ -128,7 +132,7 @@ main() {
     FLUX_ADDRESS="$FLUX_ADDRESS" \
     FLUX_SECRET="$FLUX_SECRET" \
     DRY_RUN="$DRY_RUN" \
-    bash "$script_file"
+    bash "$SCRIPT_FILE"
 }
 
 if [[ "${BOOTSTRAP_UNIT_TEST_MODE:-false}" != "true" ]]; then
