@@ -436,9 +436,7 @@ main() {
         die "PERIODIC_SETUP_ONLY must be either true or false."
 
     if [[ "$DDNS_TIMER_RUN" == "true" || "$PERIODIC_SETUP_ONLY" == "true" ]]; then
-        log "Periodic DDNS mode: skipping one-time TCP tuning and Flux installation."
-    else
-        apply_tcp_tuning
+        log "Periodic DDNS mode: skipping one-time Flux installation and TCP tuning."
     fi
 
     if ! dns_name="$(python3 -c 'import sys; print(sys.argv[1].rstrip(".").encode("idna").decode("ascii").lower())' "$DOMAIN")"; then
@@ -533,10 +531,13 @@ print("{}\t{}\t{}".format(record["id"], record["content"], str(bool(record.get("
     esac
 
     if [[ "$DDNS_TIMER_RUN" != "true" ]]; then
-        install_periodic_ddns
         if [[ "$PERIODIC_SETUP_ONLY" != "true" ]]; then
+            # A new instance must become reachable before optional software
+            # setup. Keep this order explicit: DNS, Flux, TCP, then timer.
             install_flux_panel
+            apply_tcp_tuning
         fi
+        install_periodic_ddns
     fi
     log "All requested startup tasks completed successfully."
 }

@@ -5,10 +5,11 @@ This repository contains a non-interactive EC2 User Data Bash script for Ubuntu
 
 It reads the EC2 public IPv4 (IMDSv2 first), then creates or updates only the
 exact A record configured as `DOMAIN`. It uses a Cloudflare API Token, forces
-`proxied=false`, retries temporary network failures, and can optionally run the
-Flux installer after DDNS completes.
+`proxied=false`, retries temporary network failures, then runs the Flux
+installer and applies TCP tuning. The installation order is DNS → Flux → TCP →
+periodic DDNS timer.
 
-Before DDNS, it also applies persistent TCP tuning: BBR congestion control, FQ
+It also applies persistent TCP tuning: BBR congestion control, FQ
 queue discipline, 16 MiB receive/send buffer ceilings, TCP buffer autotuning,
 MTU probing, TCP Fast Open, disabled slow start after idle, and the requested
 connection/backlog limits. The settings are saved in
@@ -18,6 +19,11 @@ After the first successful run, it installs a systemd timer. The timer checks
 the EC2 public IPv4 about 30 seconds after boot and then every minute. It only
 writes Cloudflare DNS when the A record needs a change and never re-runs the
 Flux installer during periodic checks.
+
+`--enable-periodic-only` is intentionally for an existing instance that only
+needs its DDNS timer configured or reconfigured. It skips Flux installation and
+TCP tuning. For a new EC2 instance, omit that option and provide both
+`--flux-address` and `--flux-secret`.
 
 ## Security
 
