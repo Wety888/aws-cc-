@@ -37,6 +37,7 @@ DDNS_ENV_FILE="/etc/cloudflare-ddns.env"
 DDNS_SERVICE_FILE="/etc/systemd/system/cloudflare-ddns.service"
 DDNS_TIMER_FILE="/etc/systemd/system/cloudflare-ddns.timer"
 DDNS_TIMER_RUN="${DDNS_TIMER_RUN:-false}"
+PERIODIC_SETUP_ONLY="${PERIODIC_SETUP_ONLY:-false}"
 DRY_RUN="${DRY_RUN:-false}" # true: never change sysctl/DNS or install Flux
 
 if [[ "${DDNS_UNIT_TEST_MODE:-false}" != "true" ]]; then
@@ -431,9 +432,11 @@ main() {
         die "DNS_TTL must be a supported positive DNS-only TTL, such as 300."
     [[ "$DRY_RUN" == "true" || "$DRY_RUN" == "false" ]] ||
         die "DRY_RUN must be either true or false."
+    [[ "$PERIODIC_SETUP_ONLY" == "true" || "$PERIODIC_SETUP_ONLY" == "false" ]] ||
+        die "PERIODIC_SETUP_ONLY must be either true or false."
 
-    if [[ "$DDNS_TIMER_RUN" == "true" ]]; then
-        log "Periodic DDNS run: skipping one-time TCP tuning and Flux installation."
+    if [[ "$DDNS_TIMER_RUN" == "true" || "$PERIODIC_SETUP_ONLY" == "true" ]]; then
+        log "Periodic DDNS mode: skipping one-time TCP tuning and Flux installation."
     else
         apply_tcp_tuning
     fi
@@ -531,7 +534,9 @@ print("{}\t{}\t{}".format(record["id"], record["content"], str(bool(record.get("
 
     if [[ "$DDNS_TIMER_RUN" != "true" ]]; then
         install_periodic_ddns
-        install_flux_panel
+        if [[ "$PERIODIC_SETUP_ONLY" != "true" ]]; then
+            install_flux_panel
+        fi
     fi
     log "All requested startup tasks completed successfully."
 }

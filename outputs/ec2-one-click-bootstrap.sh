@@ -13,6 +13,7 @@ FLUX_ADDRESS="${FLUX_ADDRESS:-}"
 FLUX_SECRET="${FLUX_SECRET:-}"
 DOMAIN="${DOMAIN:-2024.luneza.cc}"
 DRY_RUN="${DRY_RUN:-false}"
+PERIODIC_SETUP_ONLY="${PERIODIC_SETUP_ONLY:-false}"
 
 SCRIPT_URL="https://raw.githubusercontent.com/Wety888/aws-cc-/main/outputs/cloudflare-ddns-and-flux-user-data.sh"
 SCRIPT_FILE=""
@@ -28,7 +29,7 @@ usage() {
 Usage:
   bash <(curl -fsSL URL) \
     --cf-api-token TOKEN --flux-address HOST:PORT --flux-secret SECRET \
-    [--cf-zone-name luneza.cc] [--domain DOMAIN] [--dry-run]
+    [--cf-zone-name luneza.cc] [--domain DOMAIN] [--dry-run] [--enable-periodic-only]
 
 --cf-zone-id is optional. When omitted, the script queries the Zone ID using
 the API Token and --cf-zone-name (default: luneza.cc).
@@ -59,6 +60,8 @@ parse_arguments() {
                 require_value "$@"; DOMAIN="$2"; shift 2 ;;
             --dry-run)
                 DRY_RUN=true; shift ;;
+            --enable-periodic-only)
+                PERIODIC_SETUP_ONLY=true; shift ;;
             --help|-h)
                 usage; exit 0 ;;
             *)
@@ -115,8 +118,10 @@ main() {
     [[ -n "$CF_API_TOKEN" ]] || { printf 'Missing --cf-api-token\n' >&2; exit 2; }
     resolve_zone_id
     [[ "$CF_ZONE_ID" =~ ^[A-Fa-f0-9]{32}$ ]] || { printf 'Invalid or missing --cf-zone-id\n' >&2; exit 2; }
-    [[ -n "$FLUX_ADDRESS" ]] || { printf 'Missing --flux-address\n' >&2; exit 2; }
-    [[ -n "$FLUX_SECRET" ]] || { printf 'Missing --flux-secret\n' >&2; exit 2; }
+    if [[ "$PERIODIC_SETUP_ONLY" != "true" ]]; then
+        [[ -n "$FLUX_ADDRESS" ]] || { printf 'Missing --flux-address\n' >&2; exit 2; }
+        [[ -n "$FLUX_SECRET" ]] || { printf 'Missing --flux-secret\n' >&2; exit 2; }
+    fi
 
     SCRIPT_FILE="$(mktemp /tmp/ec2-ddns-bootstrap.XXXXXX)"
 
@@ -132,6 +137,7 @@ main() {
     FLUX_ADDRESS="$FLUX_ADDRESS" \
     FLUX_SECRET="$FLUX_SECRET" \
     DRY_RUN="$DRY_RUN" \
+    PERIODIC_SETUP_ONLY="$PERIODIC_SETUP_ONLY" \
     bash "$SCRIPT_FILE"
 }
 
