@@ -32,7 +32,12 @@ MAX_TIME=10
 FLUX_INSTALL_MAX_TIME=600
 LOG_FILE="/var/log/cloudflare-ddns.log"
 SYSCTL_FILE="/etc/sysctl.d/99-ec2-bbr-tuning.conf"
-DRY_RUN=false                # true: never change sysctl/DNS or install Flux
+DDNS_SCRIPT_FILE="/usr/local/sbin/cloudflare-ddns-sync"
+DDNS_ENV_FILE="/etc/cloudflare-ddns.env"
+DDNS_SERVICE_FILE="/etc/systemd/system/cloudflare-ddns.service"
+DDNS_TIMER_FILE="/etc/systemd/system/cloudflare-ddns.timer"
+DDNS_TIMER_RUN="${DDNS_TIMER_RUN:-false}"
+DRY_RUN="${DRY_RUN:-false}" # true: never change sysctl/DNS or install Flux
 
 if [[ "${DDNS_UNIT_TEST_MODE:-false}" != "true" ]]; then
     mkdir -p "$(dirname "$LOG_FILE")"
@@ -295,6 +300,69 @@ EOF
     log "TCP tuning applied: BBR + FQ on ${interface}; settings persist in ${SYSCTL_FILE}."
 }
 
+install_periodic_ddns() {
+    if [[ "$DDNS_TIMER_RUN" == "true" ]]; then
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "Dry run: periodic DDNS systemd timer setup skipped."
+        return 0
+    fi
+
+    require_command install
+    require_command systemctl
+
+    # Only values needed by the periodic DNS-only process are persisted. The
+    # Flux secret is deliberately not saved because timer runs never install Flux.
+    [[ "$CF_API_TOKEN" != *$'\n'* && "$CF_ZONE_ID" != *$'\n'* && "$DOMAIN" != *$'\n'* ]] ||
+        die "DDNS configuration values must not contain newlines."
+
+    install -m 700 "$0" "$DDNS_SCRIPT_FILE"
+    (
+        umask 077
+        cat > "$DDNS_ENV_FILE" <<EOF
+CF_API_TOKEN=${CF_API_TOKEN}
+CF_ZONE_ID=${CF_ZONE_ID}
+DOMAIN=${DOMAIN}
+DRY_RUN=false
+EOF
+    )
+    chmod 600 "$DDNS_ENV_FILE"
+
+    cat > "$DDNS_SERVICE_FILE" <<EOF
+[Unit]
+Description=Cloudflare DDNS synchronization for EC2 public IPv4
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=${DDNS_ENV_FILE}
+Environment=DDNS_TIMER_RUN=true
+Environment=FLUX_INSTALL_ENABLED=false
+ExecStart=${DDNS_SCRIPT_FILE}
+EOF
+
+    cat > "$DDNS_TIMER_FILE" <<'EOF'
+[Unit]
+Description=Periodically synchronize EC2 public IPv4 to Cloudflare DNS
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=1min
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now cloudflare-ddns.timer
+    log "Periodic DDNS enabled: starts about 30 seconds after boot, then every 1 minute."
+}
+
 install_flux_panel() {
     local installer_file attempt
 
@@ -364,7 +432,11 @@ main() {
     [[ "$DRY_RUN" == "true" || "$DRY_RUN" == "false" ]] ||
         die "DRY_RUN must be either true or false."
 
-    apply_tcp_tuning
+    if [[ "$DDNS_TIMER_RUN" == "true" ]]; then
+        log "Periodic DDNS run: skipping one-time TCP tuning and Flux installation."
+    else
+        apply_tcp_tuning
+    fi
 
     if ! dns_name="$(python3 -c 'import sys; print(sys.argv[1].rstrip(".").encode("idna").decode("ascii").lower())' "$DOMAIN")"; then
         die "DOMAIN is invalid: $DOMAIN"
@@ -457,7 +529,10 @@ print("{}\t{}\t{}".format(record["id"], record["content"], str(bool(record.get("
             ;;
     esac
 
-    install_flux_panel
+    if [[ "$DDNS_TIMER_RUN" != "true" ]]; then
+        install_periodic_ddns
+        install_flux_panel
+    fi
     log "All requested startup tasks completed successfully."
 }
 

@@ -14,6 +14,11 @@ MTU probing, TCP Fast Open, disabled slow start after idle, and the requested
 connection/backlog limits. The settings are saved in
 `/etc/sysctl.d/99-ec2-bbr-tuning.conf`.
 
+After the first successful run, it installs a systemd timer. The timer checks
+the EC2 public IPv4 about 30 seconds after boot and then every minute. It only
+writes Cloudflare DNS when the A record needs a change and never re-runs the
+Flux installer during periodic checks.
+
 ## Security
 
 This repository intentionally contains **no credentials**. Keep all of these
