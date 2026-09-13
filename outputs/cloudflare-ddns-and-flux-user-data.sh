@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AWS EC2 User Data: Cloudflare DNS-only DDNS + Flux Panel installer
+# AWS EC2 User Data: Cloudflare IPv4/IPv6 DNS-only DDNS + Flux Panel installer
 # Supports Ubuntu 22.04/24.04 and Debian 12.
 #
 # SECURITY: This file contains placeholders only. Do not commit a populated
@@ -65,6 +65,20 @@ import os
 import sys
 try:
     ipaddress.IPv4Address(os.environ["IP_TO_VALIDATE"])
+except ValueError:
+    sys.exit(1)
+'
+}
+
+is_valid_public_ipv6() {
+    IP_TO_VALIDATE="$1" python3 -c '
+import ipaddress
+import os
+import sys
+try:
+    address = ipaddress.IPv6Address(os.environ["IP_TO_VALIDATE"])
+    if not address.is_global:
+        raise ValueError("not globally routable")
 except ValueError:
     sys.exit(1)
 '
@@ -182,6 +196,99 @@ get_current_public_ipv4() {
     return 1
 }
 
+# Return codes: 0 = valid IPv6, 2 = EC2 has no IPv6 assigned, 1 = temporary failure.
+get_imdsv2_public_ipv6() {
+    local token response ip status
+
+    if ! token="$(
+        curl --silent --show-error \
+            --connect-timeout "$CONNECT_TIMEOUT" \
+            --max-time "$MAX_TIME" \
+            --request PUT \
+            --header "X-aws-ec2-metadata-token-ttl-seconds: 21600" \
+            "http://169.254.169.254/latest/api/token"
+    )"; then
+        return 1
+    fi
+    [[ -n "$token" ]] || return 1
+
+    # AWS exposes the first IPv6 on the primary interface at this IMDS path.
+    # Keep the HTTP status so a missing IPv6 (404) is not retried forever.
+    if ! response="$(
+        curl --silent --show-error \
+            --connect-timeout "$CONNECT_TIMEOUT" \
+            --max-time "$MAX_TIME" \
+            --header "X-aws-ec2-metadata-token: $token" \
+            --write-out $'\n%{http_code}' \
+            "http://169.254.169.254/latest/meta-data/ipv6"
+    )"; then
+        return 1
+    fi
+    status="${response##*$'\n'}"
+    ip="${response%$'\n'*}"
+    ip="${ip//$'\r'/}"
+    ip="${ip//$'\n'/}"
+
+    [[ "$status" == "404" ]] && return 2
+    [[ "$status" == "200" ]] || return 1
+    is_valid_public_ipv6 "$ip" || return 1
+    printf '%s' "$ip"
+}
+
+get_fallback_public_ipv6() {
+    local service ip
+    local -a services=(
+        "https://api64.ipify.org"
+        "https://ifconfig.co/ip"
+    )
+
+    for service in "${services[@]}"; do
+        if ip="$(
+            curl --ipv6 --silent --show-error \
+                --connect-timeout "$CONNECT_TIMEOUT" \
+                --max-time "$MAX_TIME" \
+                "$service"
+        )"; then
+            ip="${ip//$'\r'/}"
+            ip="${ip//$'\n'/}"
+            if is_valid_public_ipv6 "$ip"; then
+                printf '%s' "$ip"
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
+get_current_public_ipv6() {
+    local attempt ip imds_status
+
+    for ((attempt = 1; attempt <= RETRY_COUNT; attempt++)); do
+        if ip="$(get_imdsv2_public_ipv6)"; then
+            log "Public IPv6 source: AWS IMDSv2"
+            printf '%s' "$ip"
+            return 0
+        else
+            imds_status=$?
+            [[ "$imds_status" == "2" ]] && return 2
+        fi
+
+        if ip="$(get_fallback_public_ipv6)" && is_valid_public_ipv6 "$ip"; then
+            log "Public IPv6 source: fallback public-IP service"
+            printf '%s' "$ip"
+            return 0
+        fi
+
+        log "Unable to obtain a valid public IPv6 (attempt ${attempt}/${RETRY_COUNT})."
+        if (( attempt < RETRY_COUNT )); then
+            sleep "$RETRY_INTERVAL"
+        fi
+    done
+
+    return 1
+}
+
 cf_api() {
     local method="$1"
     local url="$2"
@@ -217,6 +324,92 @@ cf_api() {
     done
 
     return 1
+}
+
+sync_cloudflare_record() {
+    local record_type="$1"
+    local dns_name="$2"
+    local desired_ip="$3"
+    local encoded_dns_name api_base query_response record_count record_info
+    local record_id cf_current_ip cf_proxied record_payload
+
+    encoded_dns_name="$(python3 -c 'import sys; from urllib.parse import quote; print(quote(sys.argv[1], safe=""))' "$dns_name")"
+    record_payload="$(
+        DNS_NAME="$dns_name" RECORD_IP="$desired_ip" RECORD_TTL="$DNS_TTL" RECORD_TYPE="$record_type" python3 -c '
+import json
+import os
+print(json.dumps({
+    "type": os.environ["RECORD_TYPE"],
+    "name": os.environ["DNS_NAME"],
+    "content": os.environ["RECORD_IP"],
+    "ttl": int(os.environ["RECORD_TTL"]),
+    "proxied": False,
+}))
+'
+    )"
+    api_base="https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records"
+
+    if ! query_response="$(cf_api GET "${api_base}?type=${record_type}&name=${encoded_dns_name}&per_page=100")"; then
+        die "Unable to query the Cloudflare ${record_type} record."
+    fi
+    if ! record_count="$(
+        RESPONSE="$query_response" python3 -c '
+import json
+import os
+records = json.loads(os.environ["RESPONSE"]).get("result")
+if not isinstance(records, list):
+    raise ValueError("Cloudflare response has no result list")
+print(len(records))
+'
+    )"; then
+        die "Unable to parse Cloudflare ${record_type} DNS query response."
+    fi
+
+    case "$record_count" in
+        0)
+            log "Cloudflare ${record_type} current IP: <record does not exist>"
+            log "${record_type} update required: yes (creating record)"
+            if [[ "$DRY_RUN" == "true" ]]; then
+                log "Dry run: would create ${record_type} ${dns_name} -> ${desired_ip} (proxied=false)."
+            else
+                cf_api POST "$api_base" "$record_payload" >/dev/null ||
+                    die "Cloudflare ${record_type}-record creation failed."
+                log "Cloudflare ${record_type}-record creation: success (${dns_name} -> ${desired_ip}, proxied=false)"
+            fi
+            ;;
+        1)
+            record_info="$(
+                RESPONSE="$query_response" python3 -c '
+import json
+import os
+record = json.loads(os.environ["RESPONSE"])["result"][0]
+print("{}\t{}\t{}".format(record["id"], record["content"], str(bool(record.get("proxied"))).lower()))
+'
+            )"
+            IFS=$'\t' read -r record_id cf_current_ip cf_proxied <<< "$record_info"
+            log "Cloudflare ${record_type} current IP: $cf_current_ip"
+            if [[ "$cf_current_ip" == "$desired_ip" && "$cf_proxied" == "false" ]]; then
+                log "${record_type} update required: no"
+                log "Cloudflare ${record_type} record is already correct; no update API call was made."
+            else
+                if [[ "$cf_current_ip" == "$desired_ip" ]]; then
+                    log "${record_type} update required: yes (IP unchanged; correcting proxied=true to proxied=false)"
+                else
+                    log "${record_type} update required: yes"
+                fi
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    log "Dry run: would update ${record_type} ${dns_name} -> ${desired_ip} (proxied=false)."
+                else
+                    cf_api PUT "${api_base}/${record_id}" "$record_payload" >/dev/null ||
+                        die "Cloudflare ${record_type}-record update failed."
+                    log "Cloudflare ${record_type}-record update: success (${dns_name} -> ${desired_ip}, proxied=false)"
+                fi
+            fi
+            ;;
+        *)
+            die "Found ${record_count} ${record_type} records for ${dns_name}; refusing ambiguous multi-record configuration."
+            ;;
+    esac
 }
 
 apply_tcp_tuning() {
@@ -333,7 +526,7 @@ EOF
 
     cat > "$DDNS_SERVICE_FILE" <<EOF
 [Unit]
-Description=Cloudflare DDNS synchronization for EC2 public IPv4
+Description=Cloudflare DDNS synchronization for EC2 public IPv4 and IPv6
 Wants=network-online.target
 After=network-online.target
 
@@ -347,7 +540,7 @@ EOF
 
     cat > "$DDNS_TIMER_FILE" <<'EOF'
 [Unit]
-Description=Periodically synchronize EC2 public IPv4 to Cloudflare DNS
+Description=Periodically synchronize EC2 public IPv4 and IPv6 to Cloudflare DNS
 
 [Timer]
 OnBootSec=30s
@@ -416,8 +609,7 @@ install_flux_panel() {
 }
 
 main() {
-    local dns_name encoded_dns_name current_ip api_base query_response
-    local record_count record_info record_id cf_current_ip cf_proxied record_payload
+    local dns_name current_ipv4 current_ipv6 ipv6_status
 
     require_command curl
     require_command python3
@@ -442,93 +634,25 @@ main() {
     if ! dns_name="$(python3 -c 'import sys; print(sys.argv[1].rstrip(".").encode("idna").decode("ascii").lower())' "$DOMAIN")"; then
         die "DOMAIN is invalid: $DOMAIN"
     fi
-    encoded_dns_name="$(python3 -c 'import sys; from urllib.parse import quote; print(quote(sys.argv[1], safe=""))' "$dns_name")"
-
-    if ! current_ip="$(get_current_public_ipv4)"; then
+    if ! current_ipv4="$(get_current_public_ipv4)"; then
         die "Could not obtain a valid public IPv4 after ${RETRY_COUNT} attempts."
     fi
-    is_valid_ipv4 "$current_ip" || die "The obtained public IP is invalid: $current_ip"
-    log "Current EC2 public IPv4: $current_ip"
+    is_valid_ipv4 "$current_ipv4" || die "The obtained public IPv4 is invalid: $current_ipv4"
+    log "Current EC2 public IPv4: $current_ipv4"
+    sync_cloudflare_record "A" "$dns_name" "$current_ipv4"
 
-    record_payload="$(
-        DNS_NAME="$dns_name" RECORD_IP="$current_ip" RECORD_TTL="$DNS_TTL" python3 -c '
-import json
-import os
-print(json.dumps({
-    "type": "A",
-    "name": os.environ["DNS_NAME"],
-    "content": os.environ["RECORD_IP"],
-    "ttl": int(os.environ["RECORD_TTL"]),
-    "proxied": False,
-}))
-'
-    )"
-
-    api_base="https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records"
-    if ! query_response="$(cf_api GET "${api_base}?type=A&name=${encoded_dns_name}&per_page=100")"; then
-        die "Unable to query the Cloudflare A record."
+    if current_ipv6="$(get_current_public_ipv6)"; then
+        is_valid_public_ipv6 "$current_ipv6" || die "The obtained public IPv6 is invalid: $current_ipv6"
+        log "Current EC2 public IPv6: $current_ipv6"
+        sync_cloudflare_record "AAAA" "$dns_name" "$current_ipv6"
+    else
+        ipv6_status=$?
+        if [[ "$ipv6_status" == "2" ]]; then
+            log "No EC2 public IPv6 is assigned; AAAA synchronization skipped."
+        else
+            log "Unable to obtain a public IPv6 after ${RETRY_COUNT} attempts; AAAA synchronization skipped."
+        fi
     fi
-
-    if ! record_count="$(
-        RESPONSE="$query_response" python3 -c '
-import json
-import os
-records = json.loads(os.environ["RESPONSE"]).get("result")
-if not isinstance(records, list):
-    raise ValueError("Cloudflare response has no result list")
-print(len(records))
-'
-    )"; then
-        die "Unable to parse Cloudflare DNS query response."
-    fi
-
-    case "$record_count" in
-        0)
-            log "Cloudflare current IP: <A record does not exist>"
-            log "Update required: yes (creating A record)"
-            if [[ "$DRY_RUN" == "true" ]]; then
-                log "Dry run: would create ${dns_name} -> ${current_ip} (proxied=false)."
-            else
-                cf_api POST "$api_base" "$record_payload" >/dev/null ||
-                    die "Cloudflare A-record creation failed."
-                log "Cloudflare A-record creation: success (${dns_name} -> ${current_ip}, proxied=false)"
-            fi
-            ;;
-        1)
-            record_info="$(
-                RESPONSE="$query_response" python3 -c '
-import json
-import os
-record = json.loads(os.environ["RESPONSE"])["result"][0]
-print("{}\t{}\t{}".format(record["id"], record["content"], str(bool(record.get("proxied"))).lower()))
-'
-            )"
-            IFS=$'\t' read -r record_id cf_current_ip cf_proxied <<< "$record_info"
-            log "Cloudflare current IP: $cf_current_ip"
-
-            # No API write if both the address and DNS-only setting are already correct.
-            if [[ "$cf_current_ip" == "$current_ip" && "$cf_proxied" == "false" ]]; then
-                log "Update required: no"
-                log "Cloudflare A record is already correct; no update API call was made."
-            else
-                if [[ "$cf_current_ip" == "$current_ip" ]]; then
-                    log "Update required: yes (IP unchanged; correcting proxied=true to proxied=false)"
-                else
-                    log "Update required: yes"
-                fi
-                if [[ "$DRY_RUN" == "true" ]]; then
-                    log "Dry run: would update ${dns_name} -> ${current_ip} (proxied=false)."
-                else
-                    cf_api PUT "${api_base}/${record_id}" "$record_payload" >/dev/null ||
-                        die "Cloudflare A-record update failed."
-                    log "Cloudflare A-record update: success (${dns_name} -> ${current_ip}, proxied=false)"
-                fi
-            fi
-            ;;
-        *)
-            die "Found ${record_count} A records for ${dns_name}; refusing ambiguous multi-record configuration."
-            ;;
-    esac
 
     if [[ "$DDNS_TIMER_RUN" != "true" ]]; then
         if [[ "$PERIODIC_SETUP_ONLY" != "true" ]]; then

@@ -3,11 +3,13 @@
 This repository contains a non-interactive EC2 User Data Bash script for Ubuntu
 22.04/24.04 and Debian 12.
 
-It reads the EC2 public IPv4 (IMDSv2 first), then creates or updates only the
-exact A record configured as `DOMAIN`. It uses a Cloudflare API Token, forces
-`proxied=false`, retries temporary network failures, then runs the Flux
-installer and applies TCP tuning. The installation order is DNS → Flux → TCP →
-periodic DDNS timer.
+It reads the EC2 public IPv4 and IPv6 (IMDSv2 first), then creates or updates
+only the exact `A` and `AAAA` records configured as `DOMAIN`. It uses a
+Cloudflare API Token, forces `proxied=false`, retries temporary network
+failures, then runs the Flux installer and applies TCP tuning. The installation
+order is DNS → Flux → TCP → periodic DDNS timer. If the EC2 instance has no
+globally routable IPv6 assigned, it safely skips AAAA synchronization and never
+deletes an existing AAAA record.
 
 It also applies persistent TCP tuning: BBR congestion control, FQ
 queue discipline, 16 MiB receive/send buffer ceilings, TCP buffer autotuning,
@@ -16,9 +18,9 @@ connection/backlog limits. The settings are saved in
 `/etc/sysctl.d/99-ec2-bbr-tuning.conf`.
 
 After the first successful run, it installs a systemd timer. The timer checks
-the EC2 public IPv4 about 30 seconds after boot and then every minute. It only
-writes Cloudflare DNS when the A record needs a change and never re-runs the
-Flux installer during periodic checks.
+the EC2 public IPv4 and IPv6 about 30 seconds after boot and then every minute.
+It only writes Cloudflare DNS when the A or AAAA record needs a change and never
+re-runs the Flux installer during periodic checks.
 
 `--enable-periodic-only` is intentionally for an existing instance that only
 needs its DDNS timer configured or reconfigured. It skips Flux installation and
