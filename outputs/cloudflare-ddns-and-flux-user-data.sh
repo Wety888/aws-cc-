@@ -13,7 +13,7 @@ set -euo pipefail
 ###############################################################################
 CF_API_TOKEN="${CF_API_TOKEN:-REPLACE_WITH_A_NEW_CLOUDFLARE_API_TOKEN}"
 CF_ZONE_ID="${CF_ZONE_ID:-REPLACE_WITH_YOUR_32_CHARACTER_CLOUDFLARE_ZONE_ID}"
-DOMAIN="${DOMAIN:-2024.luneza.cc}"
+DOMAIN="${DOMAIN:-host.example.com}"
 
 # Flux Panel installation. Keep this disabled only if DDNS is all you need.
 FLUX_INSTALL_ENABLED="${FLUX_INSTALL_ENABLED:-true}"

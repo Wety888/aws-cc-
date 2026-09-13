@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Run with parameters, for example:
 # bash <(curl -fsSL URL) --cf-api-token TOKEN --cf-zone-id ZONE_ID \
-#   --flux-address HOST:PORT --flux-secret SECRET [--cf-zone-name luneza.cc]
+#   --flux-address HOST:PORT --flux-secret SECRET [--cf-zone-name ZONE_NAME]
 # Do NOT commit a command containing real credentials.
 
 set -euo pipefail
 
 CF_API_TOKEN="${CF_API_TOKEN:-}"
 CF_ZONE_ID="${CF_ZONE_ID:-}"
-CF_ZONE_NAME="${CF_ZONE_NAME:-luneza.cc}"
+CF_ZONE_NAME="${CF_ZONE_NAME:-}"
 FLUX_ADDRESS="${FLUX_ADDRESS:-}"
 FLUX_SECRET="${FLUX_SECRET:-}"
-DOMAIN="${DOMAIN:-2024.luneza.cc}"
+DOMAIN="${DOMAIN:-host.example.com}"
 DRY_RUN="${DRY_RUN:-false}"
 PERIODIC_SETUP_ONLY="${PERIODIC_SETUP_ONLY:-false}"
 
@@ -29,10 +29,10 @@ usage() {
 Usage:
   bash <(curl -fsSL URL) \
     --cf-api-token TOKEN --flux-address HOST:PORT --flux-secret SECRET \
-    [--cf-zone-name luneza.cc] [--domain DOMAIN] [--dry-run] [--enable-periodic-only]
+    [--cf-zone-name ZONE_NAME] [--domain DOMAIN] [--dry-run] [--enable-periodic-only]
 
---cf-zone-id is optional. When omitted, the script queries the Zone ID using
-the API Token and --cf-zone-name (default: luneza.cc).
+--cf-zone-id is optional. When both it and --cf-zone-name are omitted, the
+script selects the longest active Cloudflare zone matching --domain.
 EOF
 }
 
@@ -73,42 +73,61 @@ parse_arguments() {
 }
 
 resolve_zone_id() {
-    local encoded_zone response
+    local encoded_zone response zone_url zone_label
 
     [[ -n "$CF_ZONE_ID" ]] && return 0
-    [[ -n "$CF_ZONE_NAME" ]] || { printf 'Missing --cf-zone-name\n' >&2; exit 2; }
 
     command -v python3 >/dev/null 2>&1 || {
         printf 'python3 is required to resolve the Cloudflare Zone ID automatically.\n' >&2
         exit 1
     }
 
-    encoded_zone="$(python3 -c 'import sys; from urllib.parse import quote; print(quote(sys.argv[1], safe=""))' "$CF_ZONE_NAME")"
+    if [[ -n "$CF_ZONE_NAME" ]]; then
+        encoded_zone="$(python3 -c 'import sys; from urllib.parse import quote; print(quote(sys.argv[1], safe=""))' "$CF_ZONE_NAME")"
+        zone_url="https://api.cloudflare.com/client/v4/zones?name=${encoded_zone}&status=active"
+        zone_label="$CF_ZONE_NAME"
+    else
+        zone_url="https://api.cloudflare.com/client/v4/zones?status=active&per_page=50"
+        zone_label="a zone matching ${DOMAIN}"
+    fi
     if ! response="$(
         curl --fail --location --silent --show-error \
             --retry 10 --retry-delay 5 --retry-connrefused \
             --connect-timeout 10 --max-time 120 \
             --header "Authorization: Bearer ${CF_API_TOKEN}" \
-            "https://api.cloudflare.com/client/v4/zones?name=${encoded_zone}&status=active"
+            "$zone_url"
     )"; then
-        printf 'Unable to query Cloudflare for the Zone ID of %s.\n' "$CF_ZONE_NAME" >&2
+        printf 'Unable to query Cloudflare for the Zone ID of %s.\n' "$zone_label" >&2
         exit 1
     fi
 
-    if ! CF_ZONE_ID="$(RESPONSE="$response" python3 -c '
+    if ! CF_ZONE_ID="$(RESPONSE="$response" DOMAIN="$DOMAIN" CF_ZONE_NAME="$CF_ZONE_NAME" python3 -c '
 import json
 import os
 import sys
 
 data = json.loads(os.environ["RESPONSE"])
 records = data.get("result") or []
-if data.get("success") is not True or len(records) != 1:
+requested_zone = os.environ["CF_ZONE_NAME"].rstrip(".").lower()
+domain = os.environ["DOMAIN"].rstrip(".").lower()
+if requested_zone:
+    matches = [record for record in records if record.get("name", "").rstrip(".").lower() == requested_zone]
+else:
+    matches = [
+        record for record in records
+        if domain == record.get("name", "").rstrip(".").lower()
+        or domain.endswith("." + record.get("name", "").rstrip(".").lower())
+    ]
+    matches.sort(key=lambda record: len(record.get("name", "")), reverse=True)
+    if len(matches) > 1 and len(matches[0].get("name", "")) == len(matches[1].get("name", "")):
+        matches = []
+if data.get("success") is not True or len(matches) != 1:
     errors = data.get("errors") or []
     detail = "; ".join(str(item.get("message", "unknown error")) for item in errors)
     raise SystemExit(detail or "expected exactly one matching active zone")
-print(records[0]["id"])
+print(matches[0]["id"])
 ')"; then
-        printf 'Cloudflare Zone ID lookup failed for %s.\n' "$CF_ZONE_NAME" >&2
+        printf 'Cloudflare Zone ID lookup failed for %s.\n' "$zone_label" >&2
         exit 1
     fi
 }
